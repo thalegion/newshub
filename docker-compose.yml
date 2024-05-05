@@ -1,0 +1,74 @@
+version: '3.9'
+
+services:
+  app:
+    image: golang:alpine
+    tty: true
+    ports:
+      - "${APP_PORT}:8080"  # Using the variable for the port
+    environment:
+      - DB_HOST=db  # This refers to the service name
+      - DB_USER=${DB_USER}  # Using variable for the database user
+      - DB_PASSWORD=${DB_PASSWORD}  # Using variable for the database password
+      - DB_NAME=${DB_NAME}  # Using variable for the database name
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_USERID=${TELEGRAM_USERID}
+    volumes:
+      - .:/go
+    depends_on:
+      - db
+      - kafka
+    networks:
+      - app_network
+      - kafka_network
+
+  db:
+    image: postgres:latest
+    environment:
+      - POSTGRES_USER=${DB_USER}  # Using variable for the Postgres user
+      - POSTGRES_PASSWORD=${DB_PASSWORD}  # Using variable for the Postgres password
+      - POSTGRES_DB=${DB_NAME}  # Using variable for the Postgres database name
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT}:${DB_PORT}"  # Exposing PostgreSQL port
+    networks:
+      - app_network
+
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest  # Confluent Zookeeper image
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181  # Port for Zookeeper clients
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"  # Expose the Zookeeper port
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper  # Persist Zookeeper data
+    networks:
+      - kafka_network
+
+  kafka:
+    image: confluentinc/cp-kafka:latest  # Confluent Kafka image
+    environment:
+      KAFKA_BROKER_ID: 1  # Broker ID
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181  # Zookeeper connection string
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092  # External access
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1  # Replication factor for offsets
+    ports:
+      - "9092:9092"  # Expose the Kafka port
+    volumes:
+      - kafka_data:/var/lib/kafka  # Persist Kafka data
+    depends_on:
+      - zookeeper  # Ensure Zookeeper starts before Kafka
+    networks:
+      - kafka_network
+
+volumes:
+  db_data:
+  zookeeper_data:  # Persist Zookeeper data
+  kafka_data:  # Persist Kafka data
+
+networks:
+  app_network:
+  kafka_network:  # Network for inter-container communication
