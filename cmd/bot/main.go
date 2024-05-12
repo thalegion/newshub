@@ -2,19 +2,25 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"github.com/IBM/sarama"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"log"
+	"newshub/cmd/bot/messages"
+	"newshub/internal/broker"
+	"newshub/internal/broker/kafka"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
 func main() {
 	token := os.Getenv("TELEGRAM_TOKEN")
 	authorizedUserId, _ := strconv.ParseInt(os.Getenv("TELEGRAM_USERID"), 10, 64)
+
+	brokerManager := kafka.NewKafkaBrokerManager(os.Getenv("KAFKA_HOST"))
 
 	// Set up a context with cancellation to manage Goroutines
 	ctx, cancel := context.WithCancel(context.Background())
@@ -39,64 +45,76 @@ func main() {
 	u.Timeout = 60
 
 	telegramUpdates := bot.GetUpdatesChan(u)
-	newsConsumer := getNewsPreviewChannel()
+	newsConsumer := brokerManager.GetTopicChannel(ctx, "tg_news_previews")
 
 	for {
 		select {
 		case update := <-telegramUpdates: // Get updates from Telegram
-			if update.Message == nil {
+			if update.Message != nil {
+
+				chatID := update.Message.Chat.ID
+				userID := update.Message.From.ID
+
+				// Check if the user is authorized
+				if userID != authorizedUserId {
+					log.Printf("Unauthorized access by user ID: %d, allowed is %d", userID, authorizedUserId)
+					continue // Skip unauthorized users
+				}
+
+				// If authorized, process the message
+				tgMsg := tgbotapi.NewMessage(chatID, "Hello, authorized user!")
+				bot.Send(tgMsg)
+			} else if update.CallbackQuery != nil {
+				callbackDataParams := strings.Split(update.CallbackQuery.Data, "|")
+
+				switch callbackDataParams[0] {
+				case "process":
+					previewUuid := callbackDataParams[1]
+
+					callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "Start process of NP "+previewUuid)
+					if _, err := bot.Request(callback); err != nil {
+						panic(err)
+					}
+
+					// Create a map with some data
+					data := map[string]interface{}{
+						"uuid": previewUuid,
+					}
+
+					// Encode the map to JSON
+					jsonData, err := json.Marshal(data)
+					if err != nil {
+						log.Fatalf("Error during marshaling process message %v", err)
+					}
+					brokerManager.PostMessageToTopic("tg_process_request", broker.NewMessage(previewUuid, string(jsonData)))
+				}
+			}
+		case msg := <-newsConsumer:
+			log.Println(fmt.Sprintf("News preview message consumed: %s", msg.Payload))
+
+			var newsPreviewMsg messages.NewNewsPreview
+			err := json.Unmarshal([]byte(msg.Payload), &newsPreviewMsg)
+			if err != nil {
+				log.Printf("Error unmarshalling news preview message: %s", err)
 				continue
 			}
 
-			chatID := update.Message.Chat.ID
-			userID := update.Message.From.ID
+			// Create an inline keyboard with one button
+			keyboard := tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData("PROCESS", "process|"+newsPreviewMsg.Uuid), // Button text and callback data
+				),
+			)
 
-			// Check if the user is authorized
-			if userID != authorizedUserId {
-				log.Printf("Unauthorized access by user ID: %d, allowed is %d", userID, authorizedUserId)
-				continue // Skip unauthorized users
+			tgMsg := tgbotapi.NewMessage(authorizedUserId, newsPreviewMsg.Link)
+			tgMsg.ReplyMarkup = keyboard
+			if _, err := bot.Send(tgMsg); err != nil {
+				log.Panic(err)
 			}
-
-			// If authorized, process the message
-			tgMsg := tgbotapi.NewMessage(chatID, "Hello, authorized user!")
-			bot.Send(tgMsg)
-		case msg := <-newsConsumer.Messages():
-			log.Println(fmt.Sprintf("News preview message consumed: %s", msg.Value))
-
-			tgMsg := tgbotapi.NewMessage(authorizedUserId, string(msg.Value))
-			bot.Send(tgMsg)
-		case errMsg := <-newsConsumer.Errors():
-			log.Println(fmt.Sprintf("Some error occured: %s", errMsg.Error()))
 		case <-ctx.Done(): // Check if the context has been canceled
 			log.Println("Stopping update processing loop.")
 			bot.StopReceivingUpdates()
-			newsConsumer.Close()
 			return // Exit the loop if context is canceled
 		}
 	}
-}
-
-func getNewsPreviewChannel() sarama.PartitionConsumer {
-	// Kafka broker address
-	broker := "kafka:9092" // Kafka broker to connect to
-	// Kafka topic to consume from
-	topic := "tg_news_previews"
-
-	// Create Sarama configuration
-	config := sarama.NewConfig()
-	config.Consumer.Return.Errors = true // Enable error handling
-
-	// Create a Kafka consumer
-	consumer, err := sarama.NewConsumer([]string{broker}, config)
-	if err != nil {
-		log.Fatalf("Failed to create Kafka consumer: %v", err)
-	}
-
-	// Get a partition consumer (partition 0 in this example)
-	partitionConsumer, err := consumer.ConsumePartition(topic, 0, sarama.OffsetNewest)
-	if err != nil {
-		log.Fatalf("Failed to create partition consumer: %v", err)
-	}
-
-	return partitionConsumer
 }

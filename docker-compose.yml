@@ -11,8 +11,10 @@ services:
       - DB_USER=${DB_USER}  # Using variable for the database user
       - DB_PASSWORD=${DB_PASSWORD}  # Using variable for the database password
       - DB_NAME=${DB_NAME}  # Using variable for the database name
+      - DB_PORT=${DB_PORT}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
       - TELEGRAM_USERID=${TELEGRAM_USERID}
+      - KAFKA_HOST=${KAFKA_HOST}
     volumes:
       - .:/go
     depends_on:
